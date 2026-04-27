@@ -18,12 +18,12 @@ terraform {
 }
 
 provider "aws" {
-  region = "us-east-2"
+  region = var.aws_region
 
   default_tags {
     tags = {
-      Project     = "btc-arbitrage"
-      Environment = "dev"
+      Project     = var.project_name
+      Environment = var.environment
     }
   }
 }
@@ -33,7 +33,7 @@ provider "aws" {
 # ---------------------------
 
 resource "aws_s3_bucket" "data_lake" {
-  bucket = "btc-arbitrage-data-lake-001"
+  bucket = var.bucket_name
 }
 
 resource "aws_s3_bucket_versioning" "data_lake_versioning" {
@@ -68,7 +68,7 @@ resource "aws_s3_bucket_public_access_block" "data_lake_block" {
 # ---------------------------
 
 resource "aws_iam_role" "lambda_role" {
-  name = "lambda-btc-arbitrage-role"
+  name = "lambda-${var.project_name}-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -85,7 +85,7 @@ resource "aws_iam_role" "lambda_role" {
 }
 
 resource "aws_iam_role_policy" "lambda_policy" {
-  name = "lambda-btc-arbitrage-policy"
+  name = "lambda-${var.project_name}-policy"
   role = aws_iam_role.lambda_role.id
 
   policy = jsonencode({
@@ -99,8 +99,8 @@ resource "aws_iam_role_policy" "lambda_policy" {
           "s3:ListBucket"
         ]
         Resource = [
-          "arn:aws:s3:::btc-arbitrage-data-lake-001",
-          "arn:aws:s3:::btc-arbitrage-data-lake-001/*"
+          "arn:aws:s3:::${var.bucket_name}",
+          "arn:aws:s3:::${var.bucket_name}/*"
         ]
       },
       {
@@ -134,7 +134,7 @@ resource "aws_lambda_function" "fetch_binance" {
   memory_size = 256
 
   layers = [
-    "arn:aws:lambda:us-east-2:336392948345:layer:AWSSDKPandas-Python311:26"
+    "arn:aws:lambda:${var.aws_region}:336392948345:layer:AWSSDKPandas-Python311:26"
   ]
 
   source_code_hash = filebase64sha256("${path.module}/../lambdas/fetch_binance.zip")
@@ -157,17 +157,18 @@ resource "aws_iam_user_policy" "user_sfn_permission" {
           "states:DescribeStateMachine",
           "states:ListExecutions"
         ]
-        Resource = "*" # En producción deberías limitarlo al ARN de tu SFN
+        Resource = "*" 
       }
     ]
   })
 }
+
 # ---------------------------
 # ORQUESTACIÓN (STEP FUNCTIONS)
 # ---------------------------
 
 resource "aws_iam_role" "sfn_role" {
-  name = "sfn-btc-arbitrage-role"
+  name = "sfn-${var.project_name}-role"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -192,7 +193,7 @@ resource "aws_iam_role_policy" "sfn_lambda_policy" {
 }
 
 resource "aws_sfn_state_machine" "btc_orchestrator" {
-  name     = "btc-batch-ingestion"
+  name     = "${var.project_name}-batch-ingestion"
   role_arn = aws_iam_role.sfn_role.arn
   definition = jsonencode({
     StartAt = "IterarMeses"
