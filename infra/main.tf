@@ -28,6 +28,8 @@ provider "aws" {
   }
 }
 
+data "aws_caller_identity" "current" {}
+
 # ---------------------------
 # S3 DATA LAKE
 # ---------------------------
@@ -122,47 +124,21 @@ resource "aws_iam_role_policy" "lambda_policy" {
 
 resource "aws_lambda_function" "fetch_binance" {
   function_name = "fetch-binance"
+  filename      = "${path.module}/../lambdas/fetch_binance.zip"
+  handler       = "handler.main"
+  runtime       = "python3.11"
+  role          = aws_iam_role.lambda_role.arn
+  timeout       = 300
+  memory_size   = 256
 
-  filename = "${path.module}/../lambdas/fetch_binance.zip"
-
-  handler = "handler.main"
-  runtime = "python3.11"
-
-  role = aws_iam_role.lambda_role.arn
-
-  timeout     = 30
-  memory_size = 256
-
-  layers = [
-    "arn:aws:lambda:${var.aws_region}:336392948345:layer:AWSSDKPandas-Python311:26"
-  ]
+  environment {
+    variables = {
+      BUCKET_NAME = var.bucket_name
+    }
+  }
 
   source_code_hash = filebase64sha256("${path.module}/../lambdas/fetch_binance.zip")
 }
-
-# ---------------------------
-# PERMISSION TO EXECUTE STEP FUNCTIONS
-# ---------------------------
-resource "aws_iam_user_policy" "user_sfn_permission" {
-  name = "allow-iam1-to-start-sfn"
-  user = "iam1"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect   = "Allow"
-        Action   = [
-          "states:StartExecution",
-          "states:DescribeStateMachine",
-          "states:ListExecutions"
-        ]
-        Resource = "*" 
-      }
-    ]
-  })
-}
-
 # ---------------------------
 # ORQUESTACIÓN (STEP FUNCTIONS)
 # ---------------------------
@@ -172,8 +148,8 @@ resource "aws_iam_role" "sfn_role" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
       Principal = { Service = "states.amazonaws.com" }
     }]
   })
@@ -199,9 +175,9 @@ resource "aws_sfn_state_machine" "btc_orchestrator" {
     StartAt = "IterarMeses"
     States = {
       IterarMeses = {
-        Type       = "Map"
-        ItemsPath  = "$.periodos"
-        MaxConcurrency = 2
+        Type           = "Map"
+        ItemsPath      = "$.periodos"
+        MaxConcurrency = 3
         Iterator = {
           StartAt = "DescargarDatos"
           States = {
@@ -216,4 +192,14 @@ resource "aws_sfn_state_machine" "btc_orchestrator" {
       }
     }
   })
+}
+
+output "bucket_name" {
+  description = "Nombre del bucket del Data Lake"
+  value       = aws_s3_bucket.data_lake.id
+}
+
+output "state_machine_arn" {
+  description = "ARN de la state machine de Step Functions"
+  value       = aws_sfn_state_machine.btc_orchestrator.arn
 }

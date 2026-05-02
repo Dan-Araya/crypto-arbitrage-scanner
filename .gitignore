@@ -1,14 +1,39 @@
-# Terraform
+# --- Terraform & AWS ---
 .terraform/
 *.tfstate
 *.tfstate.backup
+tfplan
+response.json
 
-# Node
-node_modules/
-
-# Python
+# --- Python ---
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+*.protoc
+.pytest_cache/
 
-# OS
+# --- Build Artifacts (Lambdas) ---
+*.zip
+lambdas/**/*.zip
+
+# --- IDEs & OS ---
 .DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- Proyecto Específico ---
+backfill_input.json  # Si contiene fechas/parámetros privados de tu backfill

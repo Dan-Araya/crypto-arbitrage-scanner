@@ -1,32 +1,46 @@
 # 1. Análisis de API: Binance.com
-
+ 
 ## 1.1 Análisis de Conectividad
+ 
+- **Endpoint Primario:** https://data-api.binance.vision  
+- **Endpoint Alternativo:** https://api.binance.com (geo-restringido)  
+**Hallazgo Crítico — Bloqueo Geográfico:**  
+Durante las pruebas de integración desde AWS `us-east-2` (Ohio, USA), se detectó que los endpoints estándar de Binance (`api.binance.com`, `api1-4.binance.com`) rechazan solicitudes
+originadas desde IPs estadounidenses con código `HTTP 451 Unavailable For Legal Reasons`.
 
-- **Endpoint Primario:** https://api.binance.com  
-- **Endpoint de Resiliencia (Fallback):** https://api3.binance.com  
+**Evidencia (CloudWatch Logs):**
+- IP de salida Lambda: `3.144.243.253` (rango AWS us-east-2)
+- Response status `api.binance.com/api/v3/ping`: `451`
 
-**Justificación de Arquitectura:**  
-Se establece el endpoint principal como ruta estándar por su estabilidad y documentación oficial. Se incluye `api3` en la lógica de failover del pipeline para asegurar la continuidad operativa ante congestión de red o latencias elevadas en el nodo principal, aprovechando que `api3` suele ofrecer una ruta de red más directa (bypass de ciertas capas de caché).
+El código 451 indica restricción por motivos legales, evidenciando la política de Binance de no operar dominios .com en jurisdicciones estadounidenses. 
 
-- **Resultado de Prueba:** `HTTP/2 200 OK`
-
+**Resolución:**  
+Sin embargo, Binance también provee `data-api.binance.vision` como endpoint dedicado exclusivamente a datos de mercado públicos. Este endpoint ofrece los mismos endpoints REST que el principal, sin restricciones geográficas, y es la ruta oficialmente recomendada por la documentación de Binance para consultas de market data.
+ 
+**Endpoints disponibles en `data-api.binance.vision`:**  
+`GET /api/v3/klines`, `/aggTrades`, `/avgPrice`, `/depth`, `/exchangeInfo`, `/ticker/bookTicker`, `/ticker/price`, `/ticker/24hr`, `/trades`, `/uiKlines`, `/ping`, `/time`.
+ 
+- **Resultado de Prueba:** `HTTP/2 200 OK` (validado desde Lambda en `us-east-2`)
+**Fuentes de verificación:**
+- Documentación oficial (Market Data Only): https://developers.binance.com/docs/binance-spot-api-docs/faqs/market_data_only
+- Documentación general de la API: https://developers.binance.com/docs/binance-spot-api-docs/rest-api
+- Endpoints de market data: https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints
+- Repositorio de datos públicos históricos: https://github.com/binance/binance-public-data
 ## 1.2 Límites de Tasa (Rate Limiting)
-
+ 
 - **Sistema de Cuotas:** Basado en pesos (*weights*) vinculados a la IP de origen.  
 - **Límite Global:** 1,200 puntos por minuto por IP.  
 - **Peso del Endpoint (`/klines`):** 1 punto por solicitud.  
-
 **Headers de Control:**
 - `x-mbx-used-weight-1m`: Monitoreo del consumo acumulado en el minuto actual.  
-
 **Estrategia de Error:**
+- `HTTP 403`: Violación de WAF (Web Application Firewall). Evitar keywords SQL en parámetros.
 - `HTTP 429`: Detención inmediata del pipeline (*Exponential Backoff*).  
 - `HTTP 418`: IP baneada (consecuencia de ignorar el código 429).  
-
 ## 1.3 Análisis de Esquema (Data Contract)
-
+ 
 El endpoint devuelve una **Lista de Listas (Array of Arrays)**, optimizada para reducir el payload.
-
+ 
 | Índice | Campo              | Tipo de Dato | Notas de Ingeniería                          |
 |--------|--------------------|--------------|----------------------------------------------|
 | 0      | Open Time          | Long (ms)    | Unix Timestamp de apertura                   |
@@ -38,21 +52,34 @@ El endpoint devuelve una **Lista de Listas (Array of Arrays)**, optimizada para 
 | 6      | Close Time         | Long (ms)    | Unix Timestamp de cierre                     |
 | 7      | Quote Asset Volume | String       | Volumen en el activo de cotización (USDT). No utilizado en el MVP, pero documentado por completitud |
 | 8      | Trade Count        | Integer      | Número de transacciones en la vela           |
-
+ 
 ## 1.4 Consideraciones de Diseño y Tipado
-
+ 
 **Precisión y Performance:**  
 Aunque la API entrega valores en `String`, se ha optado por transformar y persistir los datos en `float64` (Double) dentro del Data Lake (Parquet).
-
+ 
 **Justificación:**  
 Para el análisis de arbitraje (spreads de 0.5%–2.0%), el error de redondeo de los floats (~10⁻¹²) es insignificante. El uso de `float64` permite aprovechar las optimizaciones de almacenamiento columnar de AWS Athena y la vectorización en procesos de backtesting, evitando la sobrecarga de serialización que implicaría el uso de `Decimal`.
-
+ 
 > **Nota de evolución:** En un sistema de producción con ejecución real de órdenes, se migraría a `Decimal` para garantizar precisión absoluta en los cálculos financieros.
-
+ 
 **Consistencia Temporal:**
 - **Orden:** Los datos se entregan en orden cronológico ascendente.  
 - **Timezone:** UTC estricto (basado en el header `Date` del servidor).  
-
+## 1.5 Recurso Alternativo: Datos Históricos Bulk
+ 
+Binance publica datasets históricos completos en `data.binance.vision` como archivos ZIP descargables directamente, organizados por símbolo, intervalo y mes:
+ 
+```
+https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1m/BTCUSDT-1m-2020-08.zip
+```
+ 
+Cada ZIP incluye un archivo `.CHECKSUM` para verificación de integridad (`sha256sum`).
+ 
+**Decisión de diseño:**  
+Para el MVP se utiliza la ingesta vía API REST (`/api/v3/klines`) porque demuestra competencias de paginación, rate limiting y manejo de errores. La descarga bulk, sin embargo, es una alternativa válida para escenarios donde el volumen justifique evitar la latencia de la API.
+ 
+**Fuente:** https://github.com/binance/binance-public-data
 
 # 2. Análisis de API: Buda.com
 
