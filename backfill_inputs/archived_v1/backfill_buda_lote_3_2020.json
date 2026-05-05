@@ -1,0 +1,89 @@
+{
+  "periodos": [
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1577836800000,
+      "end_ms": 1580515200000
+    },
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1580515200000,
+      "end_ms": 1583020800000
+    },
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1583020800000,
+      "end_ms": 1585699200000
+    },
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1585699200000,
+      "end_ms": 1588291200000
+    },
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1588291200000,
+      "end_ms": 1589587200000
+    },
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1589587200000,
+      "end_ms": 1590969600000
+    },
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1590969600000,
+      "end_ms": 1592265600000
+    },
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1592265600000,
+      "end_ms": 1593561600000
+    },
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1593561600000,
+      "end_ms": 1596240000000
+    },
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1596240000000,
+      "end_ms": 1597536000000
+    },
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1597536000000,
+      "end_ms": 1598918400000
+    },
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1598918400000,
+      "end_ms": 1600214400000
+    },
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1600214400000,
+      "end_ms": 1601510400000
+    },
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1601510400000,
+      "end_ms": 1604188800000
+    },
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1604188800000,
+      "end_ms": 1606780800000
+    },
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1606780800000,
+      "end_ms": 1608076800000
+    },
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1608076800000,
+      "end_ms": 1609459200000
+    }
+  ]
+}

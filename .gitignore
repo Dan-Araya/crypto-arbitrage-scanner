@@ -1,11 +1,11 @@
-# --- Terraform & AWS ---
+# Terraform & AWS
 .terraform/
 *.tfstate
 *.tfstate.backup
 tfplan
 response.json
 
-# --- Python ---
+# Python
 __pycache__/
 *.pyc
 *.pyo
@@ -24,16 +24,18 @@ coverage.xml
 *.protoc
 .pytest_cache/
 
-# --- Build Artifacts (Lambdas) ---
+# Build Artifacts (Lambdas)
 *.zip
-lambdas/**/*.zip
+build/
 
-# --- IDEs & OS ---
+# IDEs & OS
 .DS_Store
 .idea/
 .vscode/
 *.swp
 *.swo
 
-# --- Proyecto Específico ---
-backfill_input.json  # Si contiene fechas/parámetros privados de tu backfill
+# Local config (futuro)
+.env
+.env.local
+*.local.json

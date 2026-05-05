@@ -116,9 +116,8 @@ que manejar particiones huérfanas.
 
 Algunos meses presentan conteos ligeramente menores al teórico (44,640 para
 meses de 31 días, 43,200 para 30 días, 40,320 para febrero no bisiesto). Por
-ejemplo, noviembre 2017 tiene 43,200 records pero noviembre tiene 30 días
-(43,200 = exactamente el total esperado, OK), mientras que diciembre 2017
-tiene 44,515 vs 44,640 esperados (faltan ~125 minutos).
+ejemplo, diciembre 2017 tiene 44,515 records vs los 44,640 esperados para un
+mes de 31 días: faltan 125 minutos.
 
 ### Hipótesis
 
@@ -135,19 +134,150 @@ conocido y `volume = 0`, marcando con flag `is_synthetic = true`.
 posterior debe ser tolerante a timestamps no equiespaciados.
 
 **Decisión actual:** Opción A para consistencia con el tratamiento de Buda
-(que también requiere reconstrucción de velas vacías). El flag permite filtrar
+(donde la mayoría de minutos no tiene actividad y la reconstrucción OHLCV
+exige tomar una postura sobre los huecos — ver §5). El flag permite filtrar
 en queries analíticas si es necesario.
 
 ---
 
-## 5. Velas reconstruidas en Buda (placeholder)
+## 5. Capa Bronze para Buda: granularidad adaptativa, archivos atómicos y reconstrucción OHLCV
 
-> _Esta sección se completará cuando se implemente el handler de Buda._
+A diferencia de Binance, donde una invocación cubre un mes y produce un
+archivo, en Buda la unidad de archivo bronze **no es fija**. Esta sección
+documenta las consecuencias para el pipeline.
 
-Resumen anticipado: dado que Buda no expone un endpoint de klines y los trades
-en BTC-CLP son esporádicos (mercado de baja liquidez), el pipeline reconstruye
-velas de 1 minuto a partir de trades raw. Las velas resultantes incluirán un
-flag `is_interpolated = true` para los minutos sin actividad.
+### 5.1 Granularidad por archivo
+
+El generador `generate_buda_periods.py` decide el tamaño de cada archivo bronze
+en función del volumen muestreado del día 15 de cada mes (proxy del volumen
+mensual completo). Las posibles granularidades son:
+
+| Granularidad | Archivos por mes | Cuándo se aplica                          |
+|--------------|------------------|-------------------------------------------|
+| Mensual      | 1                | Volumen bajo (`lambda_time_est ≤ 400s`)   |
+| Quincenal    | 2                | Volumen medio (400 < est ≤ 1000s)         |
+| Semanal      | 4-5              | Volumen alto (est > 1000s)                |
+| Sub-semanal  | variable         | Override puntual (ver §5.4)               |
+
+**Implicación para silver:** un proceso que itere sobre `bronze/backtest/buda/year=YYYY/month=MM/`
+debe esperar 1 a 5 archivos por mes, sin asumir 1:1.
+
+### 5.2 Atomicidad por archivo
+
+El handler de Buda mantiene los trades en memoria durante toda la paginación
+y sólo invoca `s3.put_object()` al final, justo antes de retornar. Esta
+decisión deliberada produce dos garantías útiles:
+
+1. **No hay archivos parciales corruptos.** Si la Lambda muere por timeout o
+   por excepción, no se escribe nada en S3. El período se ejecuta atómicamente
+   o no se ejecuta.
+2. **Idempotencia simple.** Re-ejecutar el mismo período (mismo `start_ms`)
+   sobreescribe el archivo anterior porque la S3 key se deriva determinísticamente
+   de `symbol` y `start_ms`. Sin lógica especial de reconciliación.
+
+El costo es que un período cercano al timeout de Lambda pierde todo su
+trabajo si falla. Esto motivó la heurística de granularidad adaptativa
+(cuanto mayor el volumen estimado, menor la unidad de pérdida en caso de
+fallo).
+
+### 5.3 Trades raw vs OHLCV reconstruido
+
+Buda no expone un endpoint de klines (ver `api_discovery.md` §2.5). Bronze
+almacena los trades raw — array de tuplas `[ts, amount, price, direction, trade_id]`
+exactamente como llegan de la API, sin transformación. La construcción de
+velas OHLCV es responsabilidad de silver, donde:
+
+- **Bucket por minuto** usando `ts // 60_000` (truncamiento del timestamp en ms).
+- **Open** = precio del primer trade del minuto (cronológico ascendente, que
+  bronze ya garantiza por la conversión hecha en el handler).
+- **Close** = precio del último trade del minuto.
+- **High/Low** = max/min de los precios del minuto.
+- **Volume** = suma de los `amount` (en BTC).
+- **Trades** = conteo de entries en el minuto.
+
+### 5.4 Minutos sin actividad: la realidad de un mercado de baja liquidez
+
+BTC-CLP es un par de baja liquidez incluso en los años de mayor volumen.
+Empíricamente, la mayoría de minutos no tienen ningún trade. Por ejemplo:
+
+- Una semana de enero 2021 (período de actividad muy alta, durante el rally
+  hacia $40k) tuvo 25.790 trades en 7 días = ~2.5 trades/minuto promedio,
+  pero distribuidos no uniformemente: muchos minutos con 0 trades, algunos
+  con bursts.
+- Meses tempranos (2015) tienen literalmente decenas de trades en todo el
+  mes, dejando >43.000 minutos vacíos sobre los ~44.640 posibles.
+
+**Decisión:** silver almacena **una fila por minuto**, con flag
+`is_interpolated: true` cuando no hubo trades. Los campos OHLC heredan el
+último precio conocido (forward-fill); volume = 0; trades = 0.
+
+**Justificación:** el caso de uso (detección de spreads de arbitraje
+Binance-Buda) requiere un timestamp continuo para alinearse con los klines
+de Binance, que sí tienen 1 fila por minuto. Almacenar sólo minutos con
+actividad obligaría a cada query downstream a hacer un join asimétrico contra
+una serie continua. Es más simple resolver esa asimetría una vez en silver.
+
+**Consecuencia:** las particiones silver de Buda son intencionalmente
+"ruidosas" — la mayoría de filas tienen `is_interpolated: true`. Las queries
+analíticas que sólo quieran trades reales filtran por ese flag.
+
+### 5.5 Períodos sin mercado (análogo a Binance pre-listing)
+
+Buda fue lanzado como SurBTC en enero de 2015. Los primeros meses tienen
+actividad mínima o nula:
+
+| Mes | Records | Tamaño archivo | Estado                           |
+|-----|---------|----------------|----------------------------------|
+| 2015-01 | 0  | 305 B  | Pre-mercado real (archivo vacío) |
+| 2015-02 | 0  | 305 B  | Pre-mercado real                 |
+| 2015-03 | ~5 | 1.3 KiB | Mercado naciente                |
+| 2015-04 | ~50 | 5.4 KiB | Mercado naciente                |
+
+El handler descarga estos meses sin error: la API responde con
+`entries: []` y `last_timestamp: null`, lo cual el handler interpreta
+correctamente como "fin de stream" y persiste un archivo bronze con
+`records_count: 0`. Mismo principio que en Binance pre-listing (§3): bronze
+preserva la verdad histórica de la fuente.
+
+Silver debe filtrar estas particiones vacías o tolerarlas como días con
+todos los minutos `is_interpolated: true` (sin precio conocido previo, los
+campos OHLC quedarían NULL).
+
+### 5.6 Limitación conocida del sample del día 15
+
+La heurística de granularidad usa el volumen del **día 15** de cada mes como
+proxy. Funciona razonablemente cuando el volumen es relativamente uniforme
+dentro del mes, pero **subestima sistemáticamente meses con eventos exógenos
+concentrados temporalmente**. Casos observados durante el backfill:
+
+- **Diciembre 2020**: el sample del 15 cayó en zona de relativa calma; el
+  rally final del 24-31 de diciembre (BTC $19k → $29k) disparó un volumen
+  ~3x el muestreado. Resultado: timeout en la quincena 16-31. Mitigación
+  aplicada: override puntual a granularidad semanal sólo para esa quincena.
+- **Enero 2021**: el sample subestimó el efecto sostenido del rally; algunas
+  semanas terminaron muy cerca del timeout incluso con granularidad semanal.
+  Mitigación aplicada: bajar el throttle del handler de 3.0s a 2.0s, y luego
+  a 1.0s tras validar empíricamente que Cloudflare no aplica rate limiting
+  reactivo a esa frecuencia desde IPs de Lambda.
+
+**Patrón general:** la heurística de sampling es razonable pero falible para
+meses con distribuciones de volumen muy heterogéneas. La estrategia de
+mitigación combina (a) márgenes de seguridad conservadores en los thresholds
+del generador (factor 2.25x sobre el timeout), (b) overrides puntuales
+sub-semanales para casos extremos, y (c) calibración empírica del throttle
+del handler.
+
+### 5.7 Tabla de hallazgos para silver
+
+Resumen de aspectos que silver debe manejar al consumir bronze/buda:
+
+| Aspecto                                  | Tratamiento en silver                       |
+|------------------------------------------|---------------------------------------------|
+| Múltiples archivos por mes               | Iterar sin asumir 1:1; ordenar por start_ms |
+| Trades raw (no OHLCV pre-agregado)       | Reconstruir velas de 1 min (§5.3)           |
+| Mayoría de minutos sin actividad         | Forward-fill con flag `is_interpolated`     |
+| Meses pre-mercado con records_count = 0  | Filtrar o tolerar como NULLs                |
+| Trade IDs no scopeados al market         | No usar para conteos (ver `api_discovery.md` §2.3) |
 
 ---
 
@@ -196,3 +326,59 @@ Pendiente de implementar:
 
 Herramienta candidata: [Great Expectations](https://greatexpectations.io/) o
 [Soda Core](https://www.soda.io/). Pendiente de evaluación.
+
+---
+
+## 9. Verificación end-to-end de cobertura temporal (Buda bronze)
+
+Al cierre del backfill se ejecutó una validación programática de cobertura
+sobre todos los archivos de `bronze/backtest/buda/`. El propósito es responder
+con datos a las dos preguntas que importan para integridad temporal:
+
+1. ¿Cubrimos todos los días del período? (no hay gaps)
+2. ¿Algún día está cubierto por más de un archivo? (no hay solapes)
+
+### Procedimiento
+
+Para cada archivo bronze se extrajo `metadata.range_start_ms` y
+`metadata.range_end_ms`. La lista de pares `[start, end)` se ordenó por
+`start_ms`. Se chequearon dos invariantes consecutivas:
+
+- **Sin solapes:** `start[i+1] >= end[i]` para todo i.
+- **Sin gaps:** `start[i+1] == end[i]` para todo i (estrictamente).
+
+### Resultado (ejecución del 5 de mayo de 2026)
+
+| Métrica                  | Valor                                  |
+|--------------------------|----------------------------------------|
+| Archivos analizados      | 246                                    |
+| Solapes detectados       | 0                                      |
+| Gaps detectados          | 0                                      |
+| Cobertura inicial        | 2015-01-01T00:00:00+00:00              |
+| Cobertura final          | 2026-05-01T00:00:00+00:00              |
+| Días cubiertos           | 4138                                   |
+
+Todos los archivos respetaron la semántica `[start_ms, end_ms)` half-open
+acordada (ver `pipeline_design.md`), y el ensamblado de archivos por
+`start_ms` consecutivo produjo una cobertura continua sin overlap.
+
+### Implicación
+
+Cualquier query downstream que itere todos los archivos de bronze/buda en
+orden de `start_ms` puede asumir que está leyendo el histórico completo y
+contiguo de BTC-CLP en Buda, sin necesidad de deduplicación por solape ni
+de imputación por gap a nivel de archivos (la imputación por minuto sin
+trades es una preocupación distinta — ver §5.4).
+
+### Por qué importa
+
+La granularidad adaptativa de bronze/buda (§5.1) y los overrides puntuales
+(§5.6) producen una mezcla de archivos mensuales, quincenales, semanales y
+sub-semanales. Sin esta verificación, sería razonable temer un solape o gap
+entre, por ejemplo, una quincena del lote original y una semana del override
+de diciembre 2020. La verificación confirma que la matemática de fechas en
+el generador y los overrides se aplicó consistentemente.
+
+El script de validación se preserva para ejecuciones periódicas y para
+extensión a otras fuentes (Binance ya tiene un análogo natural — el
+`open_time` actuá como clave continua).

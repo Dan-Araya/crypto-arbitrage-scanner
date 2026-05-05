@@ -1,0 +1,19 @@
+{
+  "periodos": [
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1605484800000,
+      "end_ms": 1606780800000
+    },
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1606780800000,
+      "end_ms": 1608076800000
+    },
+    {
+      "symbol": "btc-clp",
+      "start_ms": 1608076800000,
+      "end_ms": 1609459200000
+    }
+  ]
+}

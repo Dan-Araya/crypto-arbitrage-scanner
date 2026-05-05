@@ -12,7 +12,13 @@ s3 = boto3.client("s3")
 # Constantes de la API de Buda (validadas empíricamente, no según doc)
 BUDA_BASE_URL = "https://www.buda.com/api/v2"
 BUDA_PAGE_SIZE = 100  # Hard cap server-side; pedir más es ignorado
-BUDA_THROTTLE_SECONDS = 3.0  # Margen sobre los ~20 req/min nominales
+BUDA_THROTTLE_SECONDS = 1.0  # Tercer ajuste empírico (lote 5, 2022-2026):
+                              # - 92 ejecuciones a 3.0s sin 429 (lotes 1-3)
+                              # - 55 ejecuciones a 2.0s sin 429 (lote 4 + piloto)
+                              # - Script residencial paralelo sostuvo 4 RPS (0.25s) por
+                              #   12h sin 429. Asumimos AWS más restrictivo, dejamos
+                              #   margen 4x: 1.0s = 1 RPS. Handler maneja 429 con
+                              #   Retry-After si Cloudflare cambia política.
 BUDA_TIMEOUT_SECONDS = 15.0
 
 
@@ -44,6 +50,10 @@ def main(event, context):
     total_throttle_waits = 0
 
     print(f"Iniciando descarga: {symbol} en [{start_ms}, {end_ms})")
+
+    # Wall-clock para métricas de RPS efectivo. Lo medimos desde aquí (no desde
+    # el inicio de la Lambda) para excluir cold start y el ip_check.
+    wall_clock_start = time.monotonic()
 
     while True:
         params = f"?timestamp={cursor}&limit={BUDA_PAGE_SIZE}"
@@ -134,6 +144,19 @@ def main(event, context):
     # Normalizamos aquí en bronze para mantener consistencia entre fuentes.
     all_trades.reverse()
 
+    # Métricas de throughput. effective_rps incluye throttle, latencia de red y
+    # esperas por 429. Si effective_rps << nominal_rps con throttle_429_events=0,
+    # la latencia de red domina y bajar BUDA_THROTTLE_SECONDS no aceleraría mucho.
+    wall_clock_seconds = time.monotonic() - wall_clock_start
+    effective_rps = pages_fetched / wall_clock_seconds if wall_clock_seconds > 0 else 0.0
+    nominal_rps = 1.0 / BUDA_THROTTLE_SECONDS
+
+    print(
+        f"Resumen: pages={pages_fetched}, wall_clock={wall_clock_seconds:.1f}s, "
+        f"effective_rps={effective_rps:.3f}, nominal_rps={nominal_rps:.3f}, "
+        f"throttle_429={total_throttle_waits}"
+    )
+
     # 4. Persistencia con metadata
     final_payload = {
         "metadata": {
@@ -147,6 +170,9 @@ def main(event, context):
             "records_count": len(all_trades),
             "pages_fetched": pages_fetched,
             "throttle_429_events": total_throttle_waits,
+            "wall_clock_seconds": round(wall_clock_seconds, 2),
+            "effective_rps": round(effective_rps, 4),
+            "nominal_rps": round(nominal_rps, 4),
         },
         "data": all_trades,
     }
@@ -171,4 +197,6 @@ def main(event, context):
         "records": len(all_trades),
         "pages": pages_fetched,
         "throttle_events": total_throttle_waits,
+        "wall_clock_seconds": round(wall_clock_seconds, 2),
+        "effective_rps": round(effective_rps, 4),
     }

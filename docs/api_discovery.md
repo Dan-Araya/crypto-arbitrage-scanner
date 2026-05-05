@@ -82,74 +82,152 @@ Para el MVP se utiliza la ingesta vía API REST (`/api/v3/klines`) porque demues
 **Fuente:** https://github.com/binance/binance-public-data
 
 # 2. Análisis de API: Buda.com
-
+ 
 ## 2.1 Análisis de Conectividad
-
-- **Endpoint Base:** https://www.buda.com/api/v2  
-- **Protocolo:** HTTPS/REST (Público).  
-- **Resultado de Prueba:** `HTTP/2 200 OK` (validado mediante `trades.json`).  
-
-**Observación de Red:**  
+ 
+- **Endpoint Base:** `https://www.buda.com/api/v2`
+- **Endpoint de trades BTC/CLP:** `/markets/btc-clp/trades.json`
+- **Protocolo:** HTTPS/REST (Público, sin autenticación para market data).
+- **Resultado de Prueba:** `HTTP/2 200 OK`.
+**Observación de Red:**
 Servidor gestionado por Cloudflare con nodo en SCL (Santiago).
+ 
+**Quirk del path:**
+La API exige el sufijo `.json` en los endpoints de market data. Omitirlo retorna `HTTP 404 Not Found`. Confirmado empíricamente:
+ 
+```
+$ curl -sI "https://www.buda.com/api/v2/markets/btc-clp/trades?limit=1"
+HTTP/2 404
+$ curl -sI "https://www.buda.com/api/v2/markets/btc-clp/trades.json?limit=1"
+HTTP/2 200
+```
+ 
+## 2.2 Política de Caché y Rate Limiting
+ 
+**Headers de respuesta observados (mayo 2026):**
+ 
+```
+cache-control: max-age=0, private, must-revalidate
+cf-cache-status: DYNAMIC
+```
+ 
+**Hallazgo:** Contrario a la documentación pública informal que mencionaba un TTL de 2 segundos, la política actual de Cloudflare en Buda es **no cachear las respuestas de trades.json**. Cada request impacta el origen.
+ 
+**Rate Limiting:** Se observaron cero eventos de HTTP 429 en 246 ejecuciones de Lambda contra el endpoint, cubriendo throttle de 3.0s, 2.0s y 1.0s (esto es, 0.33 RPS hasta 1.0 RPS) desde IPs de AWS us-east-2. Total ~30k requests sostenidos. El límite real desde Lambda tolera al menos 1 RPS (60 req/min) sin throttling reactivo. Desde IP doméstica se llegó a cubrir throttle de 0.25 segundos sin observar eventos de 429.
 
-**Quirk detectado:**  
-La API es estricta con el formato. Se requiere explícitamente el sufijo `.json` en los endpoints (ej. `/trades.json`) para evitar errores `404 Not Found`, corrigiendo así la omisión detectada en la documentación oficial.
-
-## 2.2 Límites de Tasa y Control de Flujo
-
-- **Límite Nominal:** ~20 solicitudes por minuto (dinámico).  
-- **TTL de Caché:** `max-age=2` (2 segundos).  
-
-**Estrategia de Polling:**  
-Se establece una frecuencia de consulta ≥ 2 segundos para el pipeline en tiempo real. Consultas más frecuentes consumirían cuota de IP sin obtener datos nuevos debido a la política de almacenamiento en borde (*Edge*) de Cloudflare.
-
+**Headers de control de cuota:** Buda no expone headers tipo `x-ratelimit-remaining` o equivalentes. La única señal de saturación es la respuesta `HTTP 429 Too Many Requests` con un header `Retry-After` indicando segundos a esperar.
+ 
+**Comportamiento de errores observados:**
+- `HTTP 200`: respuesta exitosa.
+- `HTTP 404`: path mal formado (típicamente falta `.json`).
+- `HTTP 429`: rate limit excedido (no observado en tests con throttling de 3s).
+- `HTTP 5xx`: errores transitorios del backend (no observados en tests).
 ## 2.3 Análisis de Esquema (Data Contract)
-
-Buda entrega las transacciones granulares en un formato de envoltorio (*wrapper*) con metadatos de paginación.
-
-**Mapeo posicional de `entries`:**
-
-| Índice | Campo       | Tipo de Dato | Transformación Final              |
-|--------|------------|--------------|----------------------------------|
-| 0      | Timestamp  | String (ms)  | Unix Epoch (milisegundos)        |
-| 1      | Amount     | String       | float64 (volumen BTC)            |
-| 2      | Price      | String       | float64 (precio CLP)             |
-| 3      | Direction  | String       | Categorical (`buy` / `sell`)     |
-| 4      | Trade ID   | Integer      | ID único para deduplicación      |
-
-## 2.4 Lógica de Paginación e Ingesta Histórica
-
-A diferencia de Binance, Buda no permite consultas por rangos de tiempo fijos, sino que utiliza un cursor basado en eventos.
-
-- **Seed:** Se inicia con el llamado a los trades más recientes.  
-- **Cursor:** Se extrae el campo `last_timestamp` de la raíz del JSON (representa el evento más antiguo del batch actual).  
-- **Iteración:** El siguiente request se parametriza como: `.../trades.json?timestamp={last_timestamp}&limit=100`  
-- **Resiliencia:** Debido al límite de ~20 req/min, el *backfill* histórico masivo requiere una implementación de *throttling* para evitar bloqueos de IP.  
-
+ 
+Buda envuelve los trades en un objeto `trades` con metadatos de paginación. La estructura completa:
+ 
+```json
+{
+  "trades": {
+    "market_id": "BTC-CLP",
+    "timestamp": "<cursor enviado en el request, o null si no se envió>",
+    "last_timestamp": "<ts del trade más antiguo del batch, o null si vacío>",
+    "entries": [
+      ["<ts_ms>", "<amount>", "<price>", "<direction>", <trade_id>],
+      ...
+    ]
+  }
+}
+```
+ 
+**Mapeo posicional de cada `entry`:**
+ 
+| Índice | Campo      | Tipo en JSON   | Notas                                        |
+|--------|------------|----------------|----------------------------------------------|
+| 0      | Timestamp  | String (ms)    | Unix epoch en milisegundos, como string.     |
+| 1      | Amount     | String         | Volumen en BTC, como string decimal.         |
+| 2      | Price      | String         | Precio en CLP, como string decimal.          |
+| 3      | Direction  | String         | `"buy"` o `"sell"` (taker side).             |
+| 4      | Trade ID   | Number nativo  | Entero JSON, NO string.                      |
+ 
+**Inconsistencia de tipos en JSON:**
+Los primeros 4 campos vienen como string (incluyendo numéricos), pero `trade_id` viene como número JSON nativo. Esta asimetría requiere atención al deserializar.
+ 
+**Observación sobre Trade IDs:**
+Los IDs son enteros estrictamente crecientes pero **NO scopeados al market BTC/CLP**: comparten contador con otros markets de Buda (ETH/CLP, BCH/CLP, etc). Esto se infiere del siguiente hallazgo empírico:
+ 
+> En el rango BTC/CLP del 15 sept 2017, los trade IDs van de 119,898 a 121,062 (delta=1,164), pero la API retorna sólo 643 trades para ese día. La diferencia (521 IDs ausentes) corresponde a trades de otros markets que no devuelve este endpoint.
+ 
+**Implicación:** los trade IDs sirven para deduplicación y verificación de unicidad **dentro del market BTC/CLP**, pero el delta de IDs entre dos puntos NO es una medida confiable del volumen de BTC/CLP en ese intervalo.
+ 
+## 2.4 Lógica de Paginación
+ 
+A diferencia de Binance, Buda no permite consultas por rango temporal. Utiliza un cursor exclusivo basado en timestamp.
+ 
+**Parámetros del endpoint:**
+- `timestamp=<ms>`: cursor exclusivo. Devuelve trades con `ts < timestamp`.
+- `limit=<n>`: tamaño de página solicitado. **Cap server-side a 100**, observado experimentalmente:
+```
+$ curl ".../trades.json?limit=500" | jq '.trades.entries | length'
+100
+```
+ 
+**Variación observada:** En algunos casos la API retorna 101 entries en vez de 100 (off-by-one del lado de Buda). El consumidor debe iterar todas las entries devueltas, sin asumir un tamaño exacto.
+ 
+**Orden de entrega:**
+Los trades vienen en **orden cronológico DESCENDENTE** (más reciente primero). Esto contrasta con Binance, que entrega ascendente.
+ 
+**Semántica del cursor (validada empíricamente):**
+ 
+| Tipo de cursor             | Comportamiento                                                |
+|----------------------------|---------------------------------------------------------------|
+| Sin cursor (sin parámetro) | Devuelve los trades más recientes del market.                 |
+| `timestamp=X`              | Devuelve trades con `ts < X` (exclusivo del valor X).         |
+| `timestamp=<muy antiguo>`  | Devuelve `entries: []` y `last_timestamp: null`.              |
+ 
+**Validación de exclusividad:**
+Si `last_timestamp` del batch actual es `T`, el siguiente request con `timestamp=T` devuelve trades estrictamente anteriores a `T`. El trade con `ts=T` queda en el batch actual y no se duplica en el siguiente. Confirmado por el test de unicidad: descargando un día completo, los trade IDs resultan únicos sin necesidad de deduplicación post-hoc.
+ 
+**Condición de fin de stream:**
+Buda señala el agotamiento del histórico devolviendo:
+ 
+```json
+{
+  "trades": {
+    "market_id": "BTC-CLP",
+    "timestamp": "<el cursor enviado>",
+    "last_timestamp": null,
+    "entries": []
+  }
+}
+```
+ 
 ## 2.5 Síntesis de Velas (OHLCV)
-
-**Hallazgo:** No existe un endpoint funcional de velas (`/candles`) en la API de Buda.
-
-**Estrategia de Datos:**  
-Para el backtest y el análisis comparativo con Binance, el pipeline asumirá la responsabilidad de reconstruir velas de 1 minuto a partir de los trades raw. La agregación se realizará en la capa de transformación (Lambda con pyarrow/pandas) antes de la persistencia en el Data Lake.
-
-**Ventaja:** Esto permite un análisis de high-tick más preciso que el de Binance, capturando el slippage real del mercado local.
-
-## 2.6 Estimación de Volumen para Backfill
-
-**Problema:** El dimensionamiento del backfill depende directamente del volumen histórico de trades en BTC/CLP. Este es un mercado de baja liquidez comparado con Binance, lo que impacta tanto los tiempos de descarga como la calidad de las velas reconstruidas.
-
-**Estimación (pendiente de validación empírica):**
-
-| Escenario | Trades/día | Páginas/día (100 trades/pág) | Tiempo/día (20 req/min) |
-|-----------|------------|------------------------------|-------------------------|
-| Baja liquidez  | ~100   | 1     | < 1 min   |
-| Media          | ~1,000 | 10    | ~30 seg   |
-| Alta (peaks)   | ~5,000 | 50    | ~2.5 min  |
-
-> **Acción requerida:** Antes de iniciar el backfill masivo, ejecutar una descarga de prueba de 1 semana para medir el volumen real y calibrar los tiempos de la Step Function.
-
-**Implicación en calidad:** En períodos de baja liquidez (< 50 trades/día), muchas velas de 1 minuto estarán vacías. El pipeline aplicará forward-fill del último close conocido para mantener la continuidad de la serie temporal, y marcará estas velas sintéticas con un flag `is_interpolated = true` para que el análisis posterior pueda filtrarlas si es necesario.
+ 
+**Hallazgo:** Buda no expone un endpoint de velas. La documentación oficial menciona `/candles` pero retorna `404` para todos los markets probados.
+ 
+**Implicación:** Cualquier representación OHLCV debe construirse a partir de los trades raw. Esta agregación es responsabilidad del consumidor, no de la API.
+ 
+## 2.6 Volumen Histórico de Trades
+ 
+*(Sección pendiente: a completar con resultados de `measure_buda_monthly_volume.py`.)*
+ 
+## 2.7 Características Distintivas vs. Binance
+ 
+Resumen comparativo de las diferencias clave entre las APIs de las dos fuentes que requieren manejo distinto en el pipeline:
+ 
+| Característica            | Binance (`/api/v3/klines`)         | Buda (`/markets/btc-clp/trades.json`) |
+|---------------------------|------------------------------------|---------------------------------------|
+| Tipo de dato              | Velas OHLCV pre-agregadas          | Trades raw                            |
+| Query model               | Por rango temporal `[start, end]`  | Por cursor exclusivo `ts < cursor`    |
+| Orden de entrega          | Cronológico ascendente             | Cronológico descendente               |
+| Tamaño de página máximo   | 1000                               | 100 (con variación a 101)             |
+| Rate limit                | 1200 weight/min (header tracked)   | ~≥1 RPS sostenido desde Lambda (hasta 4 RPS en red doméstica)    |
+| Señalización de cuota     | `x-mbx-used-weight-1m`             | Sólo `HTTP 429` reactivo              |
+| Cap geográfico            | `HTTP 451` desde IPs US            | Sin restricción geográfica observada  |
+| Endpoint de velas         | Existe                             | Documentado pero no funcional         |
+| Histórico bulk alternativo| `data.binance.vision` (ZIPs)       | No disponible                         |
+| Scope de identificadores  | `kline_open_time` por símbolo      | `trade_id` global (todos los markets) |
 
 
 # 3. Análisis de API: MIndicador.cl (Conversión USD/CLP)
