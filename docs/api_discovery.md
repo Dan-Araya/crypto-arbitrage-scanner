@@ -38,21 +38,33 @@ Sin embargo, Binance también provee `data-api.binance.vision` como endpoint ded
 - `HTTP 429`: Detención inmediata del pipeline (*Exponential Backoff*).  
 - `HTTP 418`: IP baneada (consecuencia de ignorar el código 429).  
 ## 1.3 Análisis de Esquema (Data Contract)
- 
+
 El endpoint devuelve una **Lista de Listas (Array of Arrays)**, optimizada para reducir el payload.
- 
-| Índice | Campo              | Tipo de Dato | Notas de Ingeniería                          |
-|--------|--------------------|--------------|----------------------------------------------|
-| 0      | Open Time          | Long (ms)    | Unix Timestamp de apertura                   |
-| 1      | Open Price         | String       | Mapeo a float64 para el Data Lake            |
-| 2      | High Price         | String       | Precio máximo en el intervalo                |
-| 3      | Low Price          | String       | Precio mínimo en el intervalo                |
-| 4      | Close Price        | String       | Valor base para cálculo de spread            |
-| 5      | Volume             | String       | Volumen transaccionado (base asset)          |
-| 6      | Close Time         | Long (ms)    | Unix Timestamp de cierre                     |
-| 7      | Quote Asset Volume | String       | Volumen en el activo de cotización (USDT). No utilizado en el MVP, pero documentado por completitud |
-| 8      | Trade Count        | Integer      | Número de transacciones en la vela           |
- 
+
+| Índice | Campo                       | Tipo de Dato | Notas de Ingeniería                          |
+|--------|-----------------------------|--------------|----------------------------------------------|
+| 0      | Open Time                   | Long (ms)    | Unix Timestamp de apertura                   |
+| 1      | Open Price                  | String       | Mapeo a float64 para el Data Lake            |
+| 2      | High Price                  | String       | Precio máximo en el intervalo                |
+| 3      | Low Price                   | String       | Precio mínimo en el intervalo                |
+| 4      | Close Price                 | String       | Valor base para cálculo de spread            |
+| 5      | Volume                      | String       | Volumen transaccionado (base asset, BTC)     |
+| 6      | Close Time                  | Long (ms)    | Unix Timestamp de cierre                     |
+| 7      | Quote Asset Volume          | String       | Volumen en el activo de cotización (USDT). No utilizado en el MVP, pero documentado por completitud |
+| 8      | Trade Count                 | Integer      | Número de transacciones en la vela           |
+| 9      | Taker Buy Base Asset Volume | String       | Volumen comprado por takers agresivos (BTC). Usado en Silver para `buy_volume_btc` del schema unificado — semánticamente equivalente a `sum(amount where direction='buy')` en Buda. |
+| 10     | Taker Buy Quote Asset Volume| String       | Volumen comprado por takers en quote asset (USDT). No utilizado en el MVP. |
+| 11     | Ignore                      | String       | Campo legado de Binance, valor siempre `"0"`. Se descarta en Silver. |
+
+**Nota sobre el campo 9 (`Taker Buy Base Asset Volume`):** este campo permite
+construir un schema Silver simétrico entre Binance y Buda. En Buda, la
+clasificación buy/sell viene explícita en el campo `direction` de cada trade
+(taker side). En Binance, viene pre-agregada por kline en este índice. Ambas
+representan el mismo concepto operacional — volumen donde el taker fue el
+agresor compra — y se mapean a la misma columna `buy_volume_btc` en
+`silver/backtest/unified_candles/`. La columna complementaria
+`sell_volume_btc` se deriva como `volume - taker_buy_base` (Binance) o
+`sum(amount where direction='sell')` (Buda). 
 ## 1.4 Consideraciones de Diseño y Tipado
  
 **Precisión y Performance:**  
@@ -230,55 +242,56 @@ Resumen comparativo de las diferencias clave entre las APIs de las dos fuentes q
 | Scope de identificadores  | `kline_open_time` por símbolo      | `trade_id` global (todos los markets) |
 
 
-# 3. Análisis de API: MIndicador.cl (Conversión USD/CLP)
-
-## 3.1 Análisis de Conectividad
-
-- **Endpoint:** `https://mindicador.cl/api/dolar/{dd-mm-yyyy}`  
-- **Resultado de Prueba:** `HTTP/1.1 200 OK` (validado con fecha específica).  
-
-**Observación de Estabilidad:**  
-Se detectaron errores `500 Internal Server Error` y `Socket hang up` en el endpoint raíz. Se establece como regla de diseño consultar siempre por fecha específica o el endpoint anual para minimizar la carga sobre el servidor y asegurar la respuesta.
-
-## 3.2 Política de Caché y Consumo
-
-- **TTL (Time To Live):** 3600 segundos (1 hora).  
-
-**Estrategia de Optimización:**  
-Dado que el valor del "Dólar Observado" es estático durante la mayor parte del día, el pipeline implementará una caché de nivel 1 (variable global en Lambda) para evitar llamadas redundantes en cada ciclo de arbitraje. Esto reduce la latencia del cálculo y evita sobrecargar la API externa.
-
-## 3.3 Análisis de Esquema y Tipado
-
-- **Formato:** JSON anidado con metadatos y una lista `serie`.  
-- **Tipo de Dato:** Aunque la API entrega un `float` nativo en el JSON, el pipeline lo tratará como `float64` para mantener la consistencia con el esquema de Parquet definido para los otros activos.  
-- **Acceso:** `response.serie[0].valor`  
-
-## 3.4 Manejo de Discontinuidad Temporal (Fines de semana y Festivos)
-
-A diferencia de los mercados de criptomonedas (24/7), el mercado cambiario formal opera bajo el calendario bancario chileno.
-
-**Fenómeno:**  
-Ausencia de datos para sábados, domingos y festivos nacionales.
-
-**Regla de Ingeniería (Forward Fill):**  
-El sistema implementará la lógica de "Último Valor Conocido". Ante la ausencia de un dato para la fecha `T`, se aplicará el valor de la fecha `T-n` más cercana disponible (típicamente el valor del viernes anterior).
-
-**Excepción de Lunes (aplica solo a Fase B — pipeline en vivo):**  
-El nuevo valor observado suele publicarse cerca de las 09:00 AM SCL; antes de ese horario, el sistema mantendrá el valor del cierre de la semana anterior. En la Fase A (backfill histórico), este caso no aplica porque los valores ya están publicados al momento de la descarga.
-
-
-# 4. Estrategia de Ingesta Histórica (Backfilling)
-
-Para el backtest se requiere una sincronización de tres fuentes con naturalezas distintas:
-
-| Fuente      | Método de Extracción            | Granularidad | Notas de Implementación |
-|-------------|--------------------------------|--------------|--------------------------|
-| Binance     | Iteración vía `startTime`       | 1 min (klines) | Alta fidelidad. Persistencia directa a Parquet |
-| Buda        | Iteración vía `last_timestamp`  | Trades raw   | Se descargan trades y se reconstruyen velas OHLCV de 1 min en la capa de transformación (Lambda). Incluye flag `is_interpolated` para velas sin actividad |
-| MIndicador  | Endpoint anual (`/api/dolar/YYYY`) | Diario   | Descarga masiva. Menos de 10 peticiones para cubrir todo el histórico disponible |
-
-## Regla de Sincronización Universal
-
-Todas las fuentes se normalizarán a UTC y se almacenarán en el Data Lake utilizando una estructura de particionado Hive: `year=YYYY/month=MM/day=DD`.
-
-Esto permitirá que AWS Athena realice joins temporales eficientes para calcular el spread histórico.
+# API Discovery: MIndicador.cl — Dólar Observado (USD/CLP)
+ 
+## Conectividad
+ 
+- **Endpoint anual:** `https://mindicador.cl/api/dolar/{YYYY}`
+- **Endpoint por fecha:** `https://mindicador.cl/api/dolar/{dd-mm-yyyy}`
+- **Endpoint raíz:** `https://mindicador.cl/api/dolar` — **inestable, no usar**.
+  Se detectaron errores `500 Internal Server Error` y `Socket hang up`.
+El endpoint anual devuelve todos los valores publicados para el año solicitado,
+incluyendo años en curso (responde con los datos disponibles hasta la fecha de consulta).
+ 
+## Esquema de Respuesta
+ 
+```json
+{
+  "codigo": "dolar",
+  "nombre": "Dólar Observado",
+  "unidad_medida": "Pesos",
+  "serie": [
+    {"fecha": "2023-12-29T00:00:00.000Z", "valor": 884.59},
+    {"fecha": "2023-01-03T00:00:00.000Z", "valor": 855.86}
+  ]
+}
+```
+ 
+- `serie` viene en orden **DESC** (más reciente primero). Validado empíricamente
+  el 2026-05-05 para múltiples años.
+- `serie[0]` es siempre el registro más reciente del año consultado.
+- `fecha` es ISO 8601 con hora `T00:00:00.000Z`; los primeros 10 caracteres
+  (`YYYY-MM-DD`) son suficientes para uso como fecha de referencia.
+- `valor` es `float` nativo en JSON.
+## Cobertura y Discontinuidades
+ 
+- El valor publicado es el **Dólar Observado** del Banco Central de Chile.
+- Solo se publican días hábiles bancarios (lunes a viernes, excluyendo festivos chilenos).
+- Sábados, domingos y festivos no tienen entrada en `serie` — no son nulls, simplemente
+  no existen. El consumidor debe manejar estos gaps explícitamente.
+- El valor del día suele publicarse cerca de las **09:00 AM hora de Santiago (CLT/CLST)**.
+  Antes de esa hora, `serie[0]` puede corresponder al día hábil anterior.
+## Política de Caché
+ 
+- **TTL reportado:** 3600 segundos (1 hora), observado en headers de respuesta.
+- El valor del Dólar Observado es estático durante el día hábil una vez publicado.
+## Latencia Observada
+ 
+Medición desde red residencial (Santiago, Chile), 2026-05-05:
+ 
+| Métrica | Valor  |
+|---------|--------|
+| Mínimo  | 0.716s |
+| Máximo  | 1.158s |
+| Media   | 0.903s |
+| Desvío  | 0.182s |

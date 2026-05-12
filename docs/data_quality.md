@@ -5,6 +5,39 @@ temporales, y reglas de validación entre capas.
 
 ---
 
+## 0. Filosofía de calidad: Silver describe, Gold juzga
+
+Decisión transversal del pipeline que aplica a todas las secciones siguientes:
+
+**La capa Silver describe el dato con linaje completo. No filtra, no descarta, no impone política. La capa Gold interpreta.**
+
+Consecuencias concretas:
+
+- **Velas interpoladas en Silver** (minutos sin trades en Buda, klines faltantes
+  intra-mes en Binance) se preservan con el flag `is_interpolated`. No se descartan.
+- **Valores FX rellenados** por forward-fill (fines de semana, feriados CL) se
+  preservan con el flag `is_ffilled`. No se omiten ni se interpolan
+  estadísticamente.
+- **Outliers de precio o volumen** (movimientos extremos, flash crashes,
+  spreads anómalos) se preservan tal cual llegan desde Bronze. En arbitraje
+  los outliers **son la señal**, no el ruido: filtrarlos en Silver destruiría
+  exactamente el fenómeno que el análisis busca capturar.
+- **Validaciones defensivas en Silver** son observacionales: se emiten como
+  `logger.warning` y no descartan filas (§8). Sirven para detectar corrupción
+  de invariantes físicas (precio ≤ 0, volumen negativo), no para imponer
+  juicio de calidad analítica.
+
+Esta decisión sigue el principio articulado por Bill Inmon en *Building the
+Data Warehouse* (4ª ed., 2005, Cap. 2 §"Granularity and the level of
+detail"): el data warehouse atómico debe preservar el grano máximo sin
+opinión, y toda agregación con criterio interpretativo vive en capas
+derivadas.
+
+Ver `adr_007_silver_buda_architecture.md` y `adr_008_silver_binance_architecture.md`
+para la justificación arquitectónica completa.
+
+---
+
 ## 1. Capa Bronze: principios
 
 La capa bronze es **fiel a la fuente**. Almacena la respuesta cruda de la API de Binance en JSON, con un envoltorio de metadata mínimo (`source`, `ingestion_timestamp_utc`,
@@ -128,7 +161,7 @@ faltante; simplemente omite el intervalo.
 ### Resolución en silver
 
 **Opción A — Forward fill:** rellenar minutos faltantes con el último close
-conocido y `volume = 0`, marcando con flag `is_synthetic = true`.
+conocido y `volume = 0`, marcando con flag `is_interpolated = true`.
 
 **Opción B — Mantener gaps:** dejar la serie con discontinuidades. El análisis
 posterior debe ser tolerante a timestamps no equiespaciados.
@@ -137,6 +170,9 @@ posterior debe ser tolerante a timestamps no equiespaciados.
 (donde la mayoría de minutos no tiene actividad y la reconstrucción OHLCV
 exige tomar una postura sobre los huecos — ver §5). El flag permite filtrar
 en queries analíticas si es necesario.
+
+**Resultado empírico (silver-binance):** 0.19% de las 4.58M velas finales
+son interpoladas. Cobertura efectiva ~99.81% en 8 años y 8 meses.
 
 ---
 
@@ -221,6 +257,10 @@ una serie continua. Es más simple resolver esa asimetría una vez en silver.
 "ruidosas" — la mayoría de filas tienen `is_interpolated: true`. Las queries
 analíticas que sólo quieran trades reales filtran por ese flag.
 
+**Resultado empírico (silver-buda):** 80.9% de las 5.83M velas finales son
+interpoladas. Esto refleja la baja liquidez estructural de BTC-CLP, no un
+problema de calidad: el dato refleja fielmente el mercado.
+
 ### 5.5 Períodos sin mercado (análogo a Binance pre-listing)
 
 Buda fue lanzado como SurBTC en enero de 2015. Los primeros meses tienen
@@ -269,7 +309,7 @@ del handler.
 
 ### 5.7 Tabla de hallazgos para silver
 
-Resumen de aspectos que silver debe manejar al consumir bronze/buda:
+Resumen de aspectos que silver maneja al consumir bronze/buda:
 
 | Aspecto                                  | Tratamiento en silver                       |
 |------------------------------------------|---------------------------------------------|
@@ -283,71 +323,175 @@ Resumen de aspectos que silver debe manejar al consumir bronze/buda:
 
 ## 6. Discontinuidad cambiaria (USD/CLP — MIndicador.cl)
 
-> _Esta sección se completará cuando se implemente el handler de MIndicador._
+### 6.1 Comportamiento observado
 
-Resumen anticipado: el "Dólar Observado" no se publica en sábados, domingos
-ni festivos chilenos. La regla de forward-fill aplica el último valor conocido
-(típicamente el del viernes anterior) hasta que se publica el siguiente.
+MIndicador.cl publica el **Dólar Observado** del Banco Central de Chile en
+días hábiles bancarios CL. La serie tiene huecos sistemáticos en:
+
+- Sábados y domingos (cierre de mercado cambiario).
+- Feriados chilenos (Año Nuevo, Viernes Santo, 1 de mayo, 18 de septiembre, etc.).
+- Cierres extraordinarios (eventos puntuales que el Banco Central declara
+  inhábiles).
+
+Bronze almacena el JSON crudo tal cual lo entrega MIndicador.cl: 1 archivo
+único, 2825 registros publicados, rango 2015-01-02 → 2026-05-06.
+
+### 6.2 Política de forward-fill
+
+Silver-fx aplica forward-fill diario: cada día calendario CL del rango
+recibe un valor. Días publicados conservan el valor original; días no
+publicados heredan el valor del día publicado anterior más reciente. El
+flag `is_ffilled` marca cuáles son rellenados.
+
+**Justificación operativa:** el valor cambiario aplicable a un evento de
+mercado durante el fin de semana **es de hecho** el observado del viernes
+anterior, porque no hay otro valor oficial disponible. El forward-fill no
+es una imputación estadística sino la regla de uso real del valor cambiario.
+
+### 6.3 Cobertura empírica
+
+| Métrica                           | Valor                       |
+|-----------------------------------|-----------------------------|
+| Registros publicados originales   | 2,825                       |
+| Días totales con ffill aplicado   | 4,143                       |
+| Días rellenados (`is_ffilled=true`)| 1,319 (31.84%)             |
+| Rango temporal                    | 2015-01-02 → 2026-05-06     |
+| Gap máximo consecutivo            | 5 días (feriados largos)    |
+| Umbral defensivo en `common.fx`   | 7 días (raise si se excede) |
+
+El ratio de 31.84% rellenados es consistente con la mezcla esperada de
+fines de semana (~28.6%, 2/7) más feriados CL (~3%).
+
+### 6.4 Implicación para JOIN cross-tabla
+
+El JOIN entre velas (`unified_candles`, timestamps UTC) y tipo de cambio
+(`fx_usdclp`, fechas calendario Santiago) requiere convertir el timestamp
+UTC a fecha Santiago antes del match. La divergencia diaria UTC↔Santiago
+es de 3-4 horas (depende de DST) y, sin esta conversión, introduciría
+errores sistemáticos de FX de ~0.5-1% durante esas ventanas.
+
+La conversión está implementada en `lambdas/common/fx.py::lookup_fx_for_utc_ms`.
+Ver `adr_008_silver_binance_architecture.md` §"JOIN timezone" para la
+justificación completa.
+
+### 6.5 Política sobre filas ffilled en análisis downstream
+
+Silver-fx no impone política. El consumidor decide:
+
+- **Descartar filas ffilled** si el análisis requiere FX exactamente del día
+  (descarta fines de semana completos).
+- **Conservar todas las filas** si el análisis acepta que el FX aplicable a
+  un fin de semana es el del viernes (caso por defecto).
+- **Ponderar por antigüedad** del valor publicado si el análisis es sensible
+  a gaps largos.
 
 ---
 
 ## 7. Esquema de tipado a través de capas
 
-| Campo | Bronze (JSON desde API) | Silver (Parquet) | Notas |
-|-------|------------------------|------------------|-------|
-| `open_time` | Long (ms) | Timestamp(ms, UTC) | Conversión a tipo nativo |
-| `open`, `high`, `low`, `close` | String | float64 | Justificado en `api_discovery.md` §1.4 |
-| `volume`, `quote_volume` | String | float64 | |
-| `trades_count` | Integer | int32 | |
-| `is_synthetic` | (no existe) | boolean | Generado en silver |
+### 7.1 Schema unificado `unified_candles` (silver-buda + silver-binance)
 
-**Decisión sobre precision:** se usa `float64` (no `Decimal`) por las razones
-documentadas en `api_discovery.md`. Esto es aceptable para el caso de uso
-analítico (detección de spreads del orden de 0.5%-2%, donde el error de
-redondeo de IEEE 754 a ~10⁻¹² es despreciable). En un sistema con ejecución
-real de órdenes, esta decisión debería revisarse.
+11 columnas canónicas escritas a `silver/backtest/unified_candles/year=YYYY/month=MM/{buda,binance}.parquet`:
+
+| Campo              | Tipo            | Notas                                       |
+|--------------------|-----------------|---------------------------------------------|
+| `timestamp`        | `timestamp[ms]` | UTC, inicio del minuto                      |
+| `exchange`         | `string`        | `"buda"` o `"binance"`                      |
+| `open_clp`         | `float64`       | Buda: nativo CLP. Binance: convertido vía FX|
+| `high_clp`         | `float64`       | idem                                        |
+| `low_clp`          | `float64`       | idem                                        |
+| `close_clp`        | `float64`       | idem                                        |
+| `volume_btc`       | `float64`       | Volumen total del minuto                    |
+| `buy_volume_btc`   | `float64`       | Buda: derivado de `direction`. Binance: campo directo. |
+| `sell_volume_btc`  | `float64`       | Buda: derivado. Binance: derivado de `volume - buy`. |
+| `trade_count`      | `int64`         | Buda: conteo real. Binance: campo directo (0 en interpoladas). |
+| `is_interpolated`  | `bool`          | Flag de linaje (§4 y §5.4)                  |
+
+### 7.2 Schema `fx_usdclp` (silver-fx)
+
+3 columnas escritas a `silver/backtest/fx/usdclp.parquet` (archivo único,
+no particionado — ver `adr_009_silver_fx_architecture.md` §1):
+
+| Campo        | Tipo            | Notas                                       |
+|--------------|-----------------|---------------------------------------------|
+| `date`       | `date32[day]`   | Fecha calendario Santiago, día publicado o ffilled |
+| `usdclp`     | `float64`       | Valor publicado o rellenado                 |
+| `is_ffilled` | `bool`          | Flag de linaje (§6.2)                       |
+
+### 7.3 Decisión sobre precisión numérica
+
+Se usa `float64` (no `Decimal`) por las razones documentadas en
+`api_discovery.md`. Esto es aceptable para el caso de uso analítico
+(detección de spreads del orden de 0.5%-2%, donde el error de redondeo de
+IEEE 754 a ~10⁻¹² es despreciable). En un sistema con ejecución real de
+órdenes, esta decisión debería revisarse.
 
 ---
 
-## 8. Validaciones automatizadas (futuro)
+## 8. Validaciones implementadas y validaciones futuras
+
+### 8.1 Validaciones implementadas (capa Silver)
+
+**Invariantes físicas como warning observacional** (sin descarte de filas,
+ver §0). Se ejecutan justo antes de escribir Parquet en silver-buda y
+silver-binance:
+
+```python
+bad_close = df["close_clp"] <= 0
+bad_volume = df["volume_btc"] < 0
+if bad_close.any() or bad_volume.any():
+    logger.warning("Silver invariants <exchange>: close<=0=N, volume<0=M, "
+                   "first_ts=..., last_ts=...")
+```
+
+**Resultado empírico (validación 2026-05-11):**
+
+| Lambda          | Velas evaluadas | Violaciones close≤0 | Violaciones volume<0 |
+|-----------------|-----------------|---------------------|----------------------|
+| silver-buda     | 5,831,169       | 0                   | 0                    |
+| silver-binance  | 4,576,166       | 0                   | 0                    |
+
+Las invariantes se sostienen en todo el rango temporal de ambos exchanges.
+Los warnings actúan como canario silencioso: cero ruido en operación normal,
+alerta inmediata si una regresión upstream introdujera valores no físicos.
+
+**Garantías de cobertura temporal** (verificación end-to-end, §9): cero
+gaps y cero overlaps en Bronze Buda. Análogo en Binance se infiere del
+schema natural de paginación por mes con `open_time` como clave continua.
+
+### 8.2 Validaciones futuras
 
 Pendiente de implementar:
 
-- **Schema validation:** verificar que los archivos bronze sigan el contrato
-  documentado en `api_discovery.md` (longitud del array de klines = 12 campos,
-  tipos consistentes, etc.).
-- **Range checks:** detectar precios o volúmenes fuera de rangos plausibles
-  (negativos, valores extremos que sugieran corrupción).
-- **Continuity checks:** medir gaps de tiempo entre klines consecutivas en
-  silver y alertar si exceden umbrales esperados.
-- **Cross-source consistency:** validar que los timestamps de Binance, Buda y
-  MIndicador puedan unirse correctamente en gold (todos en UTC, sin zonas
-  horarias mezcladas).
-
-Herramienta candidata: [Great Expectations](https://greatexpectations.io/) o
-[Soda Core](https://www.soda.io/). Pendiente de evaluación.
+- **Schema validation con framework dedicado:** verificar que los archivos
+  bronze sigan el contrato documentado en `api_discovery.md`. Herramienta
+  candidata: [Great Expectations](https://greatexpectations.io/) o
+  [Soda Core](https://www.soda.io/). Hoy la validación es implícita vía
+  pyarrow schema al escribir Parquet, lo que captura tipos pero no
+  semántica de negocio.
+- **Cross-source consistency en Gold:** validar que `unified_candles`
+  (UTC) hace JOIN coherente con `fx_usdclp` (Santiago) sin pérdida de
+  filas. Esto se verificará empíricamente al implementar las queries
+  Gold (fuera de scope de Fase A.4).
+- **Detección de outliers como reporte (no filtro).** Marcar velas con
+  `|Δclose| > 10%` en 1 min como observable analítico en Gold. Crítico:
+  estos no se descartan, se **reportan** como candidatos a evento de
+  arbitraje. Ver §0.
 
 ---
 
-## 9. Verificación end-to-end de cobertura temporal (Buda bronze)
+## 9. Verificación end-to-end de cobertura temporal
 
-Al cierre del backfill se ejecutó una validación programática de cobertura
-sobre todos los archivos de `bronze/backtest/buda/`. El propósito es responder
-con datos a las dos preguntas que importan para integridad temporal:
+### 9.1 Bronze Buda (ejecución 2026-05-05)
 
-1. ¿Cubrimos todos los días del período? (no hay gaps)
-2. ¿Algún día está cubierto por más de un archivo? (no hay solapes)
-
-### Procedimiento
-
-Para cada archivo bronze se extrajo `metadata.range_start_ms` y
-`metadata.range_end_ms`. La lista de pares `[start, end)` se ordenó por
-`start_ms`. Se chequearon dos invariantes consecutivas:
+Validación programática de cobertura sobre todos los archivos de
+`bronze/backtest/buda/`. Para cada archivo se extrajo
+`metadata.range_start_ms` y `metadata.range_end_ms`. La lista de pares
+`[start, end)` se ordenó por `start_ms`. Se chequearon dos invariantes
+consecutivas:
 
 - **Sin solapes:** `start[i+1] >= end[i]` para todo i.
 - **Sin gaps:** `start[i+1] == end[i]` para todo i (estrictamente).
-
-### Resultado (ejecución del 5 de mayo de 2026)
 
 | Métrica                  | Valor                                  |
 |--------------------------|----------------------------------------|
@@ -362,23 +506,46 @@ Todos los archivos respetaron la semántica `[start_ms, end_ms)` half-open
 acordada (ver `pipeline_design.md`), y el ensamblado de archivos por
 `start_ms` consecutivo produjo una cobertura continua sin overlap.
 
-### Implicación
+**Por qué importa:** la granularidad adaptativa de bronze/buda (§5.1) y
+los overrides puntuales (§5.6) producen una mezcla de archivos mensuales,
+quincenales, semanales y sub-semanales. Sin esta verificación, sería
+razonable temer un solape o gap entre, por ejemplo, una quincena del
+lote original y una semana del override de diciembre 2020. La verificación
+confirma que la matemática de fechas en el generador y los overrides se
+aplicó consistentemente.
 
-Cualquier query downstream que itere todos los archivos de bronze/buda en
-orden de `start_ms` puede asumir que está leyendo el histórico completo y
-contiguo de BTC-CLP en Buda, sin necesidad de deduplicación por solape ni
-de imputación por gap a nivel de archivos (la imputación por minuto sin
-trades es una preocupación distinta — ver §5.4).
+El script de validación se preserva para ejecuciones periódicas.
 
-### Por qué importa
+### 9.2 Cobertura efectiva del pipeline analítico
 
-La granularidad adaptativa de bronze/buda (§5.1) y los overrides puntuales
-(§5.6) producen una mezcla de archivos mensuales, quincenales, semanales y
-sub-semanales. Sin esta verificación, sería razonable temer un solape o gap
-entre, por ejemplo, una quincena del lote original y una semana del override
-de diciembre 2020. La verificación confirma que la matemática de fechas en
-el generador y los overrides se aplicó consistentemente.
+La cobertura útil para análisis de arbitraje es la **intersección** de
+las tres fuentes:
 
-El script de validación se preserva para ejecuciones periódicas y para
-extensión a otras fuentes (Binance ya tiene un análogo natural — el
-`open_time` actuá como clave continua).
+| Fuente   | Inicio       | Fin          | Notas                          |
+|----------|--------------|--------------|--------------------------------|
+| Buda     | 2015-01-01   | 2026-05-01   | Bronze completo, ~80.9% interpolado en silver |
+| Binance  | 2017-08-17   | 2026-04-30   | Limitado por listing BTCUSDT (§3) |
+| FX USD/CLP| 2015-01-02   | 2026-05-06   | ~31.84% ffilled (§6.3)         |
+| **Intersección** | **2017-08-17** | **2026-04-30** | **8 años 8 meses** |
+
+**El cuello de botella es Binance.** Buda y FX cubren 2 años y medio
+adicionales de historia, pero sin contraparte Binance no hay arbitraje
+calculable en ese período. Los registros previos a 2017-08-17 quedan
+preservados en Silver para análisis de Buda en aislamiento (volatilidad
+local, evolución del mercado chileno temprano).
+
+### 9.3 Layout final de la capa Silver
+
+| Tabla              | Path S3                                              | Particionado       | Archivos         |
+|--------------------|------------------------------------------------------|--------------------|------------------|
+| `unified_candles`  | `silver/backtest/unified_candles/year=YYYY/month=MM/`| Year/month         | 134 particiones × {buda,binance}.parquet |
+| `fx_usdclp`        | `silver/backtest/fx/usdclp.parquet`                  | Sin particionar    | 1 archivo (~42 KB)|
+
+Las 134 particiones de `unified_candles` corresponden a la unión temporal
+de los rangos de operación de ambos exchanges. Particiones tempranas
+(2015-01 a 2017-07) contienen solo `buda.parquet`; particiones desde
+2017-08 contienen ambos archivos.
+
+La asimetría de particionado entre `unified_candles` y `fx_usdclp` está
+justificada en `adr_009_silver_fx_architecture.md` §1 (Kimball: tablas
+de dimensión pequeñas no se particionan).

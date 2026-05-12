@@ -1,20 +1,21 @@
-# Data Quality Considerations
-
-## Solapamiento de un minuto entre archivos consecutivos (Binance)
-
-**Comportamiento observado:** El parámetro `endTime` de Binance es 
-inclusivo. Si dos invocaciones consecutivas se hacen con rangos 
-[T0, T1] y [T1, T2], la kline con open_time=T1 aparecerá en ambos 
-archivos.
-
-**Validado empíricamente:** Una invocación con start_ms=1704067200000 
-y end_ms=1704153600000 (1440 minutos) devolvió 1441 records.
-
-**Resolución:** Deduplicación en la capa silver por `open_time` 
-como clave natural. La capa bronze se mantiene fiel a la respuesta 
-de la API (principio: bronze nunca pierde ni modifica datos de la 
-fuente).
-
-**Alternativa descartada:** Restar 1ms al end_ms en el handler. 
-Se descartó porque depende de un comportamiento no documentado 
-de la API que podría cambiar.
+## Cobertura temporal de la capa Bronze y rango válido para Gold
+ 
+**Validado con `scripts/verify_bronze_coverage.py` el 2026-05-05.**
+ 
+| Fuente       | Inicio      | Fin         | Archivos                              |
+|--------------|-------------|-------------|---------------------------------------|
+| Binance      | 2017-08-17  | 2026-04-30  | 105 con datos + 7 vacíos pre-listing  |
+| Buda         | 2015-01-01  | 2026-05-01  | 246                                   |
+| FX (USD/CLP) | 2015-01-02  | 2026-05-06  | 1 (archivo único)                     |
+ 
+Las tres fuentes presentan cero gaps y cero solapes internos.
+ 
+**Rango válido para Gold:** `2017-08-17 → 2026-04-30` (3178 días).
+Limitado por Binance en ambos extremos: BTCUSDT no existía antes del
+listing en agosto 2017, y el backfill histórico se ejecutó hasta
+abril 2026.
+ 
+Los archivos pre-listing de Binance (enero–julio 2017, 7 archivos con
+`records_count: 0`) son válidos por diseño — el handler los genera
+para cubrir el rango solicitado aunque la API no devuelva datos. No
+se consideran gaps ni errores.
