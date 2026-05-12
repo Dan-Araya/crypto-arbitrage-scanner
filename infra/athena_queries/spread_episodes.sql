@@ -46,7 +46,7 @@ buda_close_real AS (
 ),
 spread_minuto AS (
   SELECT
-    bd.timestamp,
+    timestamp,
     bd.close_buda,
     bn.close_binance,
     (bd.close_buda - bn.close_binance) / bn.close_binance AS spread_pct
