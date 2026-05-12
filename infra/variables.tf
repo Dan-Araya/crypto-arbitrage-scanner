@@ -47,7 +47,7 @@ variable "unified_candles_year_max" {
 }
 
 variable "athena_bytes_scanned_cutoff" {
-  description = "Cutoff de bytes escaneados por query en el workgroup. Default 100MB; subir temporal a 1GB (1073741824) para queries de análisis sobre todo el histórico."
+  description = "Cutoff de bytes escaneados por query en el workgroup. Default 200MB; cubre la query de spread_episodes.sql (~125MB) con margen, mientras corta escaneos full-table accidentales (varios GB)."
   type        = number
-  default     = 104857600 # 100 MB
+  default     = 209715200 # 200 MB
 }
