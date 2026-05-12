@@ -27,3 +27,21 @@ variable "aws_sdk_pandas_layer_arn" {
   type        = string
   default     = "arn:aws:lambda:us-east-2:336392948345:layer:AWSSDKPandas-Python311:31"
 }
+
+variable "athena_results_bucket_name" {
+  description = "Bucket name para los query results de Athena (efímero, lifecycle 7d)"
+  type        = string
+  default     = "btc-arbitrage-athena-results-001"
+}
+
+variable "unified_candles_year_min" {
+  description = "Año mínimo para la proyección de particiones de unified_candles"
+  type        = number
+  default     = 2019
+}
+
+variable "unified_candles_year_max" {
+  description = "Año máximo para la proyección de particiones de unified_candles"
+  type        = number
+  default     = 2026
+}

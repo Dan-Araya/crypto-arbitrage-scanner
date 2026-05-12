@@ -502,6 +502,193 @@ resource "aws_sfn_state_machine" "mindicador_orchestrator" {
 
 
 # ---------------------------
+# ATHENA + GLUE CATALOG (Fase A.4)
+# ---------------------------
+
+# Bucket separado para query results de Athena (ephemeral)
+resource "aws_s3_bucket" "athena_results" {
+  bucket = var.athena_results_bucket_name
+}
+
+resource "aws_s3_bucket_public_access_block" "athena_results" {
+  bucket = aws_s3_bucket.athena_results.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "athena_results" {
+  bucket = aws_s3_bucket.athena_results.id
+
+  rule {
+    id     = "expire-query-results-7d"
+    status = "Enabled"
+
+    filter {}
+
+    expiration {
+      days = 7
+    }
+  }
+}
+
+# Glue Data Catalog: database
+resource "aws_glue_catalog_database" "arbitraje_btc" {
+  name        = "arbitraje_btc"
+  description = "Catálogo Silver para análisis de arbitraje BTC Buda-Binance"
+}
+
+# Tabla particionada: unified_candles (Buda + Binance)
+# Partition projection: cero estado mutable en el catálogo
+resource "aws_glue_catalog_table" "unified_candles" {
+  name          = "unified_candles"
+  database_name = aws_glue_catalog_database.arbitraje_btc.name
+  table_type    = "EXTERNAL_TABLE"
+
+  parameters = {
+    "classification"            = "parquet"
+    "projection.enabled"        = "true"
+    "projection.year.type"      = "integer"
+    "projection.year.range"     = "${var.unified_candles_year_min},${var.unified_candles_year_max}"
+    "projection.month.type"     = "integer"
+    "projection.month.range"    = "1,12"
+    "projection.month.digits"   = "2"
+    "storage.location.template" = "s3://${aws_s3_bucket.data_lake.id}/silver/backtest/unified_candles/year=$${year}/month=$${month}/"
+  }
+
+  partition_keys {
+    name = "year"
+    type = "int"
+  }
+
+  partition_keys {
+    name = "month"
+    type = "int"
+  }
+
+  storage_descriptor {
+    location      = "s3://${aws_s3_bucket.data_lake.id}/silver/backtest/unified_candles/"
+    input_format  = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat"
+    output_format = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat"
+
+    ser_de_info {
+      name                  = "parquet-serde"
+      serialization_library = "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
+
+      parameters = {
+        "serialization.format" = "1"
+      }
+    }
+
+    columns {
+      name = "timestamp"
+      type = "timestamp"
+    }
+    columns {
+      name = "exchange"
+      type = "string"
+    }
+    columns {
+      name = "open_clp"
+      type = "double"
+    }
+    columns {
+      name = "high_clp"
+      type = "double"
+    }
+    columns {
+      name = "low_clp"
+      type = "double"
+    }
+    columns {
+      name = "close_clp"
+      type = "double"
+    }
+    columns {
+      name = "volume_btc"
+      type = "double"
+    }
+    columns {
+      name = "buy_volume_btc"
+      type = "double"
+    }
+    columns {
+      name = "sell_volume_btc"
+      type = "double"
+    }
+    columns {
+      name = "trade_count"
+      type = "bigint"
+    }
+    columns {
+      name = "is_interpolated"
+      type = "boolean"
+    }
+  }
+}
+
+# Tabla sin particionar: fx_usdclp (archivo único)
+resource "aws_glue_catalog_table" "fx_usdclp" {
+  name          = "fx_usdclp"
+  database_name = aws_glue_catalog_database.arbitraje_btc.name
+  table_type    = "EXTERNAL_TABLE"
+
+  parameters = {
+    "classification" = "parquet"
+  }
+
+  storage_descriptor {
+    location      = "s3://${aws_s3_bucket.data_lake.id}/silver/backtest/fx/"
+    input_format  = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat"
+    output_format = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat"
+
+    ser_de_info {
+      name                  = "parquet-serde"
+      serialization_library = "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
+
+      parameters = {
+        "serialization.format" = "1"
+      }
+    }
+
+    columns {
+      name = "date"
+      type = "date"
+    }
+    columns {
+      name = "usdclp"
+      type = "double"
+    }
+    columns {
+      name = "is_ffilled"
+      type = "boolean"
+    }
+  }
+}
+
+# Athena workgroup con cost guardrail
+resource "aws_athena_workgroup" "arbitraje_btc_wg" {
+  name        = "arbitraje_btc_wg"
+  description = "Workgroup para queries del proyecto BTC arbitrage. 100MB cutoff."
+
+  configuration {
+    enforce_workgroup_configuration    = true
+    publish_cloudwatch_metrics_enabled = true
+    bytes_scanned_cutoff_per_query     = 104857600 # 100 MB
+
+    result_configuration {
+      output_location = "s3://${aws_s3_bucket.athena_results.id}/queries/"
+
+      encryption_configuration {
+        encryption_option = "SSE_S3"
+      }
+    }
+  }
+}
+
+# ---------------------------
 # OUTPUTS
 # ---------------------------
 
