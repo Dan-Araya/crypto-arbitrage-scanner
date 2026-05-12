@@ -676,7 +676,7 @@ resource "aws_athena_workgroup" "arbitraje_btc_wg" {
   configuration {
     enforce_workgroup_configuration    = true
     publish_cloudwatch_metrics_enabled = true
-    bytes_scanned_cutoff_per_query     = 104857600 # 100 MB
+    bytes_scanned_cutoff_per_query     = var.athena_bytes_scanned_cutoff
 
     result_configuration {
       output_location = "s3://${aws_s3_bucket.athena_results.id}/queries/"
@@ -735,4 +735,19 @@ output "silver_binance_lambda_arn" {
 output "silver_fx_lambda_arn" {
   description = "ARN de la Lambda silver-fx (transformación Bronze→Silver para USD/CLP)"
   value       = aws_lambda_function.silver_fx.arn
+}
+
+output "athena_workgroup_name" {
+  description = "Workgroup de Athena para correr queries del proyecto"
+  value       = aws_athena_workgroup.arbitraje_btc_wg.name
+}
+
+output "glue_database_name" {
+  description = "Database de Glue Catalog (Silver layer)"
+  value       = aws_glue_catalog_database.arbitraje_btc.name
+}
+
+output "athena_results_bucket" {
+  description = "Bucket donde se guardan los results de Athena (lifecycle 7d)"
+  value       = aws_s3_bucket.athena_results.id
 }

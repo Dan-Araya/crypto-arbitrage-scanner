@@ -29,19 +29,25 @@ variable "aws_sdk_pandas_layer_arn" {
 }
 
 variable "athena_results_bucket_name" {
-  description = "Bucket name para los query results de Athena (efímero, lifecycle 7d)"
+  description = "Bucket S3 para query results de Athena (ephemeral, 7d lifecycle)"
   type        = string
   default     = "btc-arbitrage-athena-results-001"
 }
 
 variable "unified_candles_year_min" {
-  description = "Año mínimo para la proyección de particiones de unified_candles"
+  description = "Año mínimo para partition projection de unified_candles"
   type        = number
-  default     = 2019
+  default     = 2017
 }
 
 variable "unified_candles_year_max" {
-  description = "Año máximo para la proyección de particiones de unified_candles"
+  description = "Año máximo para partition projection de unified_candles"
   type        = number
   default     = 2026
+}
+
+variable "athena_bytes_scanned_cutoff" {
+  description = "Cutoff de bytes escaneados por query en el workgroup. Default 100MB; subir temporal a 1GB (1073741824) para queries de análisis sobre todo el histórico."
+  type        = number
+  default     = 104857600 # 100 MB
 }
