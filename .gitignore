@@ -40,5 +40,9 @@ build/
 .env
 .env.local
 *.local.json
+
 # Athena query results (cache local, no commiteable)
 query_results/
+
+#Cover
+assets/cover.png
