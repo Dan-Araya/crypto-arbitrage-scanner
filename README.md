@@ -22,77 +22,66 @@ El pipeline ingiere tres fuentes con esquemas distintos, las normaliza en una ca
 ## Arquitectura
 
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#2d2d2d', 'primaryTextColor': '#ffffff', 'primaryBorderColor': '#555', 'lineColor': '#aaaaaa', 'secondaryColor': '#3a3a3a', 'tertiaryColor': '#2a2a2a'}}}%%
 flowchart TB
     subgraph Sources["Fuentes externas"]
         B[Binance<br/>data-api.binance.vision]
         BD[Buda.com<br/>www.buda.com/api/v2]
         M[MIndicador.cl<br/>USD/CLP]
     end
-
     subgraph Ingestion["Capa de ingesta: AWS"]
         SF1[Step Functions<br/>binance-batch-ingestion]
         SF2[Step Functions<br/>buda-ingestion]
         SF3[Step Functions<br/>mindicador-ingestion]
-        L1[Lambda: fetch-binance ]
-        L2[Lambda: fetch-buda ]
-        L3[Lambda: fetch-mindicador ]
+        L1[Lambda: fetch-binance]
+        L2[Lambda: fetch-buda]
+        L3[Lambda: fetch-mindicador]
     end
-
     subgraph BronzeBox["Capa Bronze: S3"]
-        BR[Bronze <br/>JSON crudo + metadata<br/>year=YYYY/month=MM/]
+        BR[Bronze<br/>JSON crudo + metadata<br/>year=YYYY/month=MM/]
     end
-
-    STX["Lambdas Silver <br/>silver-buda: reconstrucción OHLCV desde trades<br/>silver-binance: cast + JOIN con FX (USDT → CLP)<br/>silver-fx: forward-fill de feriados<br/>full refresh idempotente"]
-
+    STX["Lambdas Silver<br/>silver-buda: reconstrucción OHLCV desde trades<br/>silver-binance: cast + JOIN con FX USDT→CLP<br/>silver-fx: forward-fill de feriados<br/>full refresh idempotente"]
     subgraph SilverBox["Capa Silver: S3"]
-        SI[Silver <br/>Parquet unificado<br/>schema 11 cols + particionado]
+        SI[Silver<br/>Parquet unificado<br/>schema 11 cols + particionado]
     end
-
-    GO[Gold <br/>Tablas materializadas<br/>fuera de scope V1]
-
+    GO[Gold<br/>Tablas materializadas<br/>fuera de scope V1]
     subgraph Catalog["Catálogo & análisis"]
-        GC[Glue Data Catalog <br/>partition projection]
-        AT[Athena <br/>workgroup con cost guard]
+        GC[Glue Data Catalog<br/>partition projection]
+        AT[Athena<br/>workgroup con cost guard]
         NB[Notebooks / Dashboard]
     end
 
-    %% Flecha invisible para forzar verticalidad Sources → Ingestion
     Sources ~~~ Ingestion
-
     B -->|REST /klines 1m| L1
     BD -->|REST trades.json crudos<br/>cursor pagination| L2
     M -->|REST /api/dolar/| L3
-
     SF1 -.orquesta.-> L1
     SF2 -.orquesta.-> L2
     SF3 -.orquesta.-> L3
-
     L1 -->|put_object| BR
     L2 -->|put_object| BR
     L3 -->|put_object| BR
-
     BR --> STX
     STX -->|put_object| SI
-
     SI -.materialización futura.-> GO
     SI -->|registra schema| GC
     SI -->|lee Parquets| AT
     GC -.consulta schema.-> AT
     AT --> NB
 
-    style L1 fill:#90EE90
-    style L2 fill:#90EE90
-    style L3 fill:#90EE90
-    style BR fill:#90EE90
-    style SI fill:#90EE90
-    style STX fill:#90EE90
-    style SF1 fill:#90EE90
-    style SF2 fill:#90EE90
-    style SF3 fill:#90EE90
-    style GC fill:#90EE90
-    style AT fill:#90EE90
-    style GO fill:#FFE4B5
-    style NB fill:#FFE4B5
+    style L1  fill:#3a7d44,color:#ffffff,stroke:#2d6136
+    style L2  fill:#3a7d44,color:#ffffff,stroke:#2d6136
+    style L3  fill:#3a7d44,color:#ffffff,stroke:#2d6136
+    style SF1 fill:#3a7d44,color:#ffffff,stroke:#2d6136
+    style SF2 fill:#3a7d44,color:#ffffff,stroke:#2d6136
+    style SF3 fill:#3a7d44,color:#ffffff,stroke:#2d6136
+    style BR  fill:#3a7d44,color:#ffffff,stroke:#2d6136
+    style STX fill:#3a7d44,color:#ffffff,stroke:#2d6136
+    style SI  fill:#3a7d44,color:#ffffff,stroke:#2d6136
+    style GC  fill:#3a7d44,color:#ffffff,stroke:#2d6136
+    style AT  fill:#3a7d44,color:#ffffff,stroke:#2d6136
+    style GO  fill:#7a6020,color:#ffffff,stroke:#5a4510
+    style NB  fill:#7a6020,color:#ffffff,stroke:#5a4510
 ```
 
 **Leyenda:** verde = implementado, amarillo = fuera de alcance del proyecto.
