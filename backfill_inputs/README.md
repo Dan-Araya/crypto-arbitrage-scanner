@@ -32,3 +32,4 @@ Inputs puntuales para resolver casos donde la heurística adaptativa de
   en zona calma).
 - `backfill_buda_lote_4_2021_v2_pendientes.json` — pendientes tras el
   ajuste de throttle a 2.0s.
+
