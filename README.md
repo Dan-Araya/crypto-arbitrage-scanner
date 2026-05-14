@@ -1,4 +1,4 @@
-# Crypto Arbitrage Scanner
+# Pipeline de datos para análisis histórico de arbitraje de BTC
 
 Este es un proyecto de Data Engineering cuyo objetivo es reconstruir el histórico de diferenciales de precio de Bitcoin entre Binance (BTC-USDT) y Buda.com (BTC-CLP), normalizado por el tipo de cambio USD/CLP.
 
@@ -15,9 +15,9 @@ Dentro del periodo analizado, los momentos de mayor intensidad llegaron a difere
 
 ## ¿Qué resuelve?
 
-El proyecto parte de la hipótesis de que los exchanges chilenos como Buda.com pueden presentar diferenciales de precio sostenidos respecto al mercado internacional de BTC, derivados de baja liquidez, fricciones de cambio CLP/USD y barreras operativas para el arbitraje. Este proyecto construye la base de datos histórica necesaria para cuantificar ese fenómeno minuto a minuto desde 2017.
+El proyecto parte de la hipótesis de que los exchanges chilenos como Buda.com pueden presentar diferenciales de precio sostenidos respecto al mercado internacional de BTC, derivados, entre otros factores, de la baja liquidez, fricciones de cambio CLP/USD y barreras operativas para el arbitraje. Este proyecto construye la base de datos histórica necesaria para cuantificar ese fenómeno minuto a minuto desde 2017.
 
-El pipeline ingiere tres fuentes con esquemas distintos, las normaliza en una capa Silver común y produce series temporales alineadas para análisis. **No es un sistema de trading**: es un proyecto de portfolio orientado a demostrar diseño de pipelines batch en AWS, con énfasis en idempotencia, observabilidad y decisiones explícitas sobre concesiones técnicas.
+El pipeline ingiere tres fuentes con esquemas distintos, las normaliza en una capa Silver común y produce series temporales alineadas para análisis. **No es un sistema de trading**: es un proyecto de portfolio orientado a demostrar diseño de pipelines batch en AWS, con énfasis en idempotencia, observabilidad y decisiones explícitas sobre diversas concesiones técnicas.
 
 ## Arquitectura
 
@@ -95,7 +95,7 @@ flowchart TB
     style NB fill:#FFE4B5
 ```
 
-**Leyenda:** verde = implementado, amarillo = fuera de scope actual.
+**Leyenda:** verde = implementado, amarillo = fuera de alcance del proyecto.
 
 ## Métricas del estado actual
 

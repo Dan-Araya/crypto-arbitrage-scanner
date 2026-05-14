@@ -225,7 +225,7 @@ def render(fig, data, hl):
     # ---- Caption (dos líneas para no exceder el ancho) ----
     caption_y = y_bot - 0.030
     caption = (
-        "Top 20 episodios sostenidos de prima Buda > Binance ≥ 1%  —  "
+        "Top 20 episodios sostenidos de precio BTC en Buda > Binance ≥ 1% "
         "ordenados por spread promedio.\n"
         "Período 2017-08 a 2026-04.  "
         "Granularidad minutal.  Filtra velas interpoladas en Buda."
